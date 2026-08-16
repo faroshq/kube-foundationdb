@@ -74,13 +74,26 @@ func (f *FDB) getLast(tr *fdb.Transaction, key string) (*ByKeyAndRevisionRecord,
 }
 
 func (f *FDB) Count(_ context.Context, prefix, startKey string, revision int64) (revRet int64, count int64, err error) {
+	cacheable := revision == 0 && prefix == startKey && f.pollActive.Load()
+	if cacheable {
+		if cached, seedRev, ok := f.counts.get(prefix); ok {
+			if cursor := f.lastWatchRev.Load(); cursor >= seedRev {
+				return cursor, cached, nil
+			}
+		}
+	}
+
 	collector := &countCollector{}
 	rev, err := f.listWithCollector("Count", prefix, startKey, revision, collector)
 	if err != nil {
 		return 0, 0, err
-	} else {
-		return rev, collector.totalCount, nil
 	}
+	if cacheable {
+		// events with revision <= rev are in the scan; the poll loop applies
+		// only newer ones, so seeding is exact even if the poll lags the scan
+		f.counts.seed(prefix, collector.totalCount, rev)
+	}
+	return rev, collector.totalCount, nil
 }
 
 type countCollector struct {

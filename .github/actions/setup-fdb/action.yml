@@ -35,10 +35,31 @@ runs:
             exit 0
           fi
           # the deb normally configures a new database itself; retry in case it did not
-          fdbcli --exec "configure new single memory" --timeout 10 || true
+          fdbcli --exec "configure new single ssd" --timeout 10 || true
           sleep 2
         done
         echo "FoundationDB did not become available" >&2
+        fdbcli --exec "status" --timeout 10 || true
+        exit 1
+    - name: Use the ssd storage engine
+      if: inputs.server == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The deb configures 'single memory', whose storage_memory default caps
+        # the database at ~1 GiB per process. The driver denormalizes every
+        # value into a second subspace, so the large-record tests write well
+        # past that and the cluster starts stalling commits (error 1031).
+        # The ssd engine is bounded by runner disk instead.
+        fdbcli --exec "configure ssd" --timeout 30
+        for i in $(seq 1 30); do
+          if fdbcli --exec "status minimal" --timeout 5 2>/dev/null | grep -q "available"; then
+            echo "FoundationDB is available on the ssd storage engine"
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "FoundationDB did not become available after switching to ssd" >&2
         fdbcli --exec "status" --timeout 10 || true
         exit 1
     - name: Export cluster file environment

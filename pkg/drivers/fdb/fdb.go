@@ -50,6 +50,8 @@ type FDB struct {
 
 	backgroundReadWg sync.WaitGroup
 	lastWatchRev     atomic.Int64
+	pollActive       atomic.Bool
+	counts           *countTracker
 
 	// pollKick wakes the watch poll loop immediately after a local write
 	// commits, instead of waiting for the FDB watch to fire (~10-30ms). Sub-ms
@@ -76,6 +78,7 @@ func NewFDB(connectionString string, tlsConfig tls.Config, dirName string, wg *s
 		dirName:          dirName,
 		wg:               wg,
 		pollKick:         make(chan struct{}, 1),
+		counts:           newCountTracker(),
 	}
 	return &FdbLogger{
 		backend:   ThisFDB,

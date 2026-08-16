@@ -1,2 +1,3 @@
 .fdb/
 bin/kube-foundationdb
+bin/

@@ -65,6 +65,27 @@ make test-smoke    # etcd clientv3 put/get/txn/list/watch (shim must be running:
 make test-e2e      # boots shim + kcp binary, CRUD + watch + Workspace scheduling (~30 s)
 ```
 
+`test/e2e` also covers **HA** (kcp against two shim replicas: cross-shim
+watch delivery bounded by `--fdb-poll-interval`, and failover when a shim is
+SIGKILLed) and **multi-tenancy** (two isolated kcp control planes on one
+FoundationDB cluster via separate `--fdb-directory`).
+
+### Robustness (linearizability)
+
+`make test-robustness` runs the etcd robustness framework (Kubernetes-shaped
+traffic, porcupine linearizability validation, watch validation, WAL
+cross-check) against the in-process shim — the harness under `test/robustness`
+is adapted from f8n. Uses sequential test revisions (`UseSequentialId`) as the
+etcd model requires gapless revisions.
+
+### Container image
+
+`make docker` builds a linux image (multi-arch capable) bundling `libfdb_c`;
+mount the cluster file at `/etc/foundationdb/fdb.cluster`. Note FDB servers
+advertise their registered addresses, so the cluster must be reachable at
+those addresses from inside the container (same Docker network / routable
+cluster), not through port mapping.
+
 ### Upstream Kubernetes conformance
 
 The official Kubernetes conformance suite (sig-api-machinery focus) can be run
@@ -125,9 +146,9 @@ allocations, not serialization. See
 GitHub Actions (`.github/workflows/`):
 
 - `ci.yml` — on every PR/push: `validate` (gofmt, vet, tidy), driver tests
-  against a real FoundationDB, etcd-client smoke tests, and the kcp e2e as a
-  matrix over the latest three kcp releases (currently v0.32.3, v0.31.6,
-  v0.30.3).
+  against a real FoundationDB, etcd-client smoke tests, the robustness
+  harness, a Docker image build, and the kcp e2e as a matrix over the latest
+  three kcp releases (currently v0.32.3, v0.31.6, v0.30.3).
 - `conformance.yml` — on main, nightly, and on demand: upstream
   sig-api-machinery conformance as a matrix over the latest three Kubernetes
   minors via k3s (currently v1.36.3, v1.35.7, v1.34.10).

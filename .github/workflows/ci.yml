@@ -75,6 +75,29 @@ jobs:
       - name: Run smoke tests
         run: go test ./test/smoke/ -v -count=1
 
+  robustness:
+    name: Robustness (linearizability)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: test/robustness/go.mod
+      - uses: ./.github/actions/setup-fdb
+      - name: Run robustness harness
+        working-directory: test/robustness
+        run: go test . -count=1 -timeout 1800s
+
+  docker-image:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t kube-foundationdb:ci .
+
   kcp-e2e:
     name: kcp e2e (kcp ${{ matrix.kcp }})
     runs-on: ubuntu-latest

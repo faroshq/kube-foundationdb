@@ -56,6 +56,14 @@ test-e2e: build fdb-start ## full e2e: kcp binary running on FoundationDB
 vet:
 	go vet ./...
 
+.PHONY: test-robustness
+test-robustness: fdb-start ## etcd robustness harness: kube traffic + linearizability validation
+	cd test/robustness && FDB_CONNECTION_STRING="kube:fdb@127.0.0.1:4500" go test . -count=1 -timeout 1800s
+
+.PHONY: docker
+docker: ## build the linux container image
+	docker build -t kube-foundationdb:dev .
+
 .PHONY: bench
 bench: ## kube-style workload benchmark against a running shim (see test/bench)
 	go run ./test/bench --endpoint http://127.0.0.1:2379 --prefix /registry/bench-$$(date +%s)

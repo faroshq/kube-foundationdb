@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strings"
+	"time"
+
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	"github.com/k3s-io/kine/pkg/server"
 	"github.com/sirupsen/logrus"
-	"math"
-	"strings"
 )
 
 // https://github.com/etcd-io/etcd/blob/f072712e29a2dafc92e7cfb3c76cea60e0d508b2/server/storage/mvcc/watcher_group.go#L28
@@ -140,6 +142,11 @@ func (f *FDB) poll(result chan interface{}, pollStart int64) {
 	f.backgroundReadWg.Add(1)
 	defer f.backgroundReadWg.Done()
 	f.lastWatchRev.Store(pollStart)
+	// a fresh poll cursor skips earlier events, so tracked counts seeded
+	// against an older cursor can no longer be maintained
+	f.counts.reset()
+	f.pollActive.Store(true)
+	defer f.pollActive.Store(false)
 
 	defer close(result)
 
@@ -154,37 +161,68 @@ func (f *FDB) poll(result chan interface{}, pollStart int64) {
 			return f.watch.Watch(&tr), nil
 		})
 		if err != nil {
+			logrus.Errorf("Error registering the watch err=%v", err)
+			select {
+			case <-f.ctx.Done():
+				return
+			case <-time.After(pollErrorBackoff):
+			}
 			continue
 		}
 
-		var events []*server.Event
-		var lastRev int64
 		currentRev := f.lastWatchRev.Load()
 		logrus.Tracef("POLLING lastRev=%d", currentRev)
-		for lastRev, events, err = f.afterBatch(currentRev, func(s string) bool { return true }); err != nil; {
+		lastRev, events, err := f.afterBatch(currentRev, func(s string) bool { return true })
+		if err != nil {
+			// afterBatch already retries every retryable FDB error inside
+			// transact(); what reaches us is either fatal or the cluster being
+			// unable to serve right now. Re-polling immediately just spins,
+			// so back off and start the poll over from the same cursor.
 			logrus.Errorf("Error in 'afterBatch' err=%v", err)
+			watchFuture.Cancel()
+			select {
+			case <-f.ctx.Done():
+				return
+			case <-time.After(pollErrorBackoff):
+			}
+			continue
 		}
-		logrus.Tracef("AFTER POLL lastRev=%d => res=%v err=%v", currentRev, len(events), err)
+		logrus.Tracef("AFTER POLL lastRev=%d => res=%v", currentRev, len(events))
 		for _, event := range events {
 			logrus.Tracef("AFTER POLL EVENT key=%s create=%v delete=%v lastRev=%d", event.KV.Key, event.Create, event.Delete, event.KV.ModRevision)
 		}
 
 		if len(events) > 0 {
+			f.counts.apply(events)
 			result <- events
 			f.lastWatchRev.Store(events[len(events)-1].KV.ModRevision)
 			watchFuture.Cancel()
 		} else {
 			f.lastWatchRev.Store(lastRev)
+			var timer *time.Timer
+			var floor <-chan time.Time
+			if PollIntervalFloor > 0 {
+				timer = time.NewTimer(PollIntervalFloor)
+				floor = timer.C
+			}
 			select {
 			case <-f.ctx.Done():
+				if timer != nil {
+					timer.Stop()
+				}
 				watchFuture.Cancel()
 				return
 			case <-f.pollKick:
+				watchFuture.Cancel()
+			case <-floor:
 				watchFuture.Cancel()
 			case err := <-WaitForFutureNil(watchFuture):
 				if err != nil {
 					logrus.Errorf("Error waiting for a watch err=%v", err)
 				}
+			}
+			if timer != nil {
+				timer.Stop()
 			}
 		}
 	}
