@@ -41,6 +41,23 @@ runs:
         echo "FoundationDB did not become available" >&2
         fdbcli --exec "status" --timeout 10 || true
         exit 1
+    - name: Add a second fdbserver process
+      if: inputs.server == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # one process handles all roles by default; a second one roughly
+        # doubles commit throughput, which the write-heavy driver tests need
+        echo "[fdbserver.4501]" | sudo tee -a /etc/foundationdb/foundationdb.conf
+        sudo service foundationdb restart
+        for i in $(seq 1 30); do
+          if fdbcli --exec "status minimal" --timeout 5 2>/dev/null | grep -q "available"; then
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "FoundationDB did not come back after adding a process" >&2
+        exit 1
     - name: Use the ssd storage engine
       if: inputs.server == 'true'
       shell: bash

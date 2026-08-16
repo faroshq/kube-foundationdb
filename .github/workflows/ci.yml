@@ -47,6 +47,8 @@ jobs:
           go-version-file: go.mod
       - uses: ./.github/actions/setup-fdb
       - name: Run driver tests
+        env:
+          FDB_TEST_LARGE_RECORDS: "100"
         run: go test ./pkg/drivers/fdb/ -count=1 -timeout 600s
 
   smoke-test:

@@ -276,7 +276,10 @@ func TestFDBLargeRecords(t *testing.T) {
 
 	watchLarge := f.Watch(ctx, "/large/", 0)
 
-	recordCount := 300
+	// CI runners drive a much smaller FDB than a dev machine; 300 x 2 MiB
+	// records (written twice: by-revision + current-value) can back the commit
+	// queue up past the transaction timeout there.
+	recordCount, _ := env.GetInt("FDB_TEST_LARGE_RECORDS", 300)
 	records := createRecords(t, f, ctx, recordCount, maxRecordSize)
 
 	for i := 0; i < recordCount; {
