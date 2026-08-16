@@ -1,0 +1,6 @@
+kube-foundationdb
+Copyright 2026 the kube-foundationdb authors.
+
+This product includes software developed as part of the f8n project
+(https://github.com/melgenek/f8n), licensed under the Apache License 2.0.
+The FoundationDB kine driver under pkg/drivers/fdb is derived from f8n.

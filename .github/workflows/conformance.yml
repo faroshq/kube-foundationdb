@@ -1,0 +1,91 @@
+name: Conformance
+
+# Upstream Kubernetes sig-api-machinery conformance against k3s running on the
+# FoundationDB shim as its datastore. Long-running (~40 min per version), so it
+# runs on main, nightly, and on demand rather than on every PR.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conformance:
+    name: sig-api-machinery (k8s ${{ matrix.k8s }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # latest three Kubernetes minors (n-2) via k3s; bump patches as they release
+        k8s: ["v1.36.3", "v1.35.7", "v1.34.10"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: ./.github/actions/setup-fdb
+      - name: Build shim
+        run: go build -o bin/kube-foundationdb ./cmd/kube-foundationdb
+      - name: Run shim
+        run: |
+          ./bin/kube-foundationdb --listen-address 0.0.0.0:2380 \
+            --metrics-bind-address 127.0.0.1:18081 \
+            --fdb-directory conformance > /tmp/shim.log 2>&1 &
+          for i in $(seq 1 30); do
+            (exec 3<>/dev/tcp/127.0.0.1/2380) 2>/dev/null && exit 0
+            sleep 1
+          done
+          echo "shim did not start" >&2
+          cat /tmp/shim.log
+          exit 1
+      - name: Start k3s on the shim
+        run: |
+          docker run -d --name k3s --privileged \
+            --add-host=host.docker.internal:host-gateway \
+            -e K3S_DATASTORE_ENDPOINT="http://host.docker.internal:2380" \
+            -e K3S_TOKEN=citoken \
+            -v kubeconfig:/etc/rancher/k3s \
+            docker.io/rancher/k3s:${{ matrix.k8s }}-k3s1 server \
+            --kube-apiserver-arg=etcd-compaction-interval=10s \
+            --disable=coredns,servicelb,traefik,local-storage,metrics-server \
+            --kube-apiserver-arg=feature-gates=WatchList=true \
+            --disable-network-policy
+          for i in $(seq 1 90); do
+            if docker exec k3s kubectl get --raw /readyz >/dev/null 2>&1; then
+              echo "k3s ready on FoundationDB"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "k3s did not become ready" >&2
+          docker logs k3s 2>&1 | tail -100
+          exit 1
+      - name: Run conformance (sig-api-machinery)
+        run: |
+          docker run --rm --name kubeconformance \
+            --network container:k3s \
+            -e KUBECONFIG="/etc/rancher/k3s/k3s.yaml" \
+            -e E2E_FOCUS="sig-api-machinery" \
+            -e E2E_SKIP="StorageVersionAPI|DynamicResourceAllocation|MutatingAdmissionPolicy|CoordinatedLeaderElection|VolumeAttributesClass|OrderedNamespaceDeletion|Slow|Flaky|should\shonor\stimeout" \
+            -v kubeconfig:/etc/rancher/k3s:ro \
+            --entrypoint /usr/local/bin/kubeconformance \
+            registry.k8s.io/conformance:${{ matrix.k8s }}
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/artifacts
+          cp /tmp/shim.log /tmp/artifacts/ 2>/dev/null || true
+          docker logs k3s > /tmp/artifacts/k3s.log 2>&1 || true
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-logs-${{ matrix.k8s }}
+          path: /tmp/artifacts/
+          if-no-files-found: ignore

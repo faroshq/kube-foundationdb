@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate (fmt, vet, tidy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # client library only: cgo packages need libfdb_c + headers to compile
+      - uses: ./.github/actions/setup-fdb
+        with:
+          server: "false"
+      - name: gofmt
+        run: |
+          out=$(gofmt -l cmd pkg test)
+          if [ -n "$out" ]; then
+            echo "unformatted files:" && echo "$out" && exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go mod tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  driver-test:
+    name: Driver tests (real FoundationDB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: ./.github/actions/setup-fdb
+      - name: Run driver tests
+        run: go test ./pkg/drivers/fdb/ -count=1 -timeout 600s
+
+  smoke-test:
+    name: Smoke tests (etcd clientv3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: ./.github/actions/setup-fdb
+      - name: Build shim
+        run: go build -o bin/kube-foundationdb ./cmd/kube-foundationdb
+      - name: Run shim
+        run: |
+          ./bin/kube-foundationdb --listen-address 127.0.0.1:2379 \
+            --metrics-bind-address 127.0.0.1:18081 \
+            --fdb-directory ci-smoke &
+          for i in $(seq 1 30); do
+            (exec 3<>/dev/tcp/127.0.0.1/2379) 2>/dev/null && exit 0
+            sleep 1
+          done
+          echo "shim did not start" >&2
+          exit 1
+      - name: Run smoke tests
+        run: go test ./test/smoke/ -v -count=1
+
+  kcp-e2e:
+    name: kcp e2e (kcp ${{ matrix.kcp }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # latest three kcp minor releases (n-2); bump patches as they release
+        kcp: ["v0.32.3", "v0.31.6", "v0.30.3"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: ./.github/actions/setup-fdb
+      - name: Build shim
+        run: go build -o bin/kube-foundationdb ./cmd/kube-foundationdb
+      - name: Download kcp ${{ matrix.kcp }}
+        run: |
+          ver="${{ matrix.kcp }}"
+          curl -fsSLo /tmp/kcp.tar.gz \
+            "https://github.com/kcp-dev/kcp/releases/download/${ver}/kcp_${ver#v}_linux_amd64.tar.gz"
+          mkdir -p /tmp/kcp-bin
+          tar -xzf /tmp/kcp.tar.gz -C /tmp/kcp-bin
+          /tmp/kcp-bin/bin/kcp --help >/dev/null
+      - name: Run kcp e2e
+        env:
+          KCP_BINARY: /tmp/kcp-bin/bin/kcp
+          KUBE_FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
+        run: go test ./test/e2e/ -v -count=1 -timeout 900s

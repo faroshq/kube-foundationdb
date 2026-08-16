@@ -1,0 +1,49 @@
+name: Setup FoundationDB
+description: Install FoundationDB client library and a single-node server on the runner
+inputs:
+  version:
+    description: FoundationDB version (matching an apple/foundationdb release tag)
+    required: false
+    default: "7.3.77"
+  server:
+    description: Also install and start a single-node fdbserver
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Install FoundationDB packages
+      shell: bash
+      run: |
+        set -euo pipefail
+        VERSION="${{ inputs.version }}"
+        BASE="https://github.com/apple/foundationdb/releases/download/${VERSION}"
+        curl -fsSLo /tmp/fdb-clients.deb "${BASE}/foundationdb-clients_${VERSION}-1_amd64.deb"
+        sudo dpkg -i /tmp/fdb-clients.deb
+        if [ "${{ inputs.server }}" = "true" ]; then
+          curl -fsSLo /tmp/fdb-server.deb "${BASE}/foundationdb-server_${VERSION}-1_amd64.deb"
+          sudo dpkg -i /tmp/fdb-server.deb
+        fi
+    - name: Wait for FoundationDB to be available
+      if: inputs.server == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        for i in $(seq 1 30); do
+          if fdbcli --exec "status minimal" --timeout 5 2>/dev/null | grep -q "available"; then
+            echo "FoundationDB is available"
+            exit 0
+          fi
+          # the deb normally configures a new database itself; retry in case it did not
+          fdbcli --exec "configure new single memory" --timeout 10 || true
+          sleep 2
+        done
+        echo "FoundationDB did not become available" >&2
+        fdbcli --exec "status" --timeout 10 || true
+        exit 1
+    - name: Export cluster file environment
+      if: inputs.server == 'true'
+      shell: bash
+      run: |
+        echo "FDB_CLUSTER_FILE=/etc/foundationdb/fdb.cluster" >> "$GITHUB_ENV"
+        echo "FDB_CONNECTION_STRING=$(cat /etc/foundationdb/fdb.cluster)" >> "$GITHUB_ENV"
