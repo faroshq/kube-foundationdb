@@ -124,12 +124,11 @@ func (f *FDB) listKeyValue(caller, prefix, startKey string, limit, maxRevision i
 }
 
 type listCollector struct {
-	f              *FDB
-	limit          int64
-	keysOnly       bool
-	records        []*RevRecord
-	batchIterators []*fdb.RangeIterator
-	batchRecords   []*RevRecord
+	f            *FDB
+	limit        int64
+	keysOnly     bool
+	records      []*RevRecord
+	batchRecords []*RevRecord
 }
 
 func newListCollector(f *FDB, limit int64, keysOnly bool) *listCollector {
@@ -138,66 +137,109 @@ func newListCollector(f *FDB, limit int64, keysOnly bool) *listCollector {
 		capacity = 100
 	}
 	return &listCollector{
-		f:              f,
-		limit:          limit,
-		keysOnly:       keysOnly,
-		records:        make([]*RevRecord, 0, capacity),
-		batchIterators: make([]*fdb.RangeIterator, 0, capacity),
-		batchRecords:   make([]*RevRecord, 0, capacity),
+		f:            f,
+		limit:        limit,
+		keysOnly:     keysOnly,
+		records:      make([]*RevRecord, 0, capacity),
+		batchRecords: make([]*RevRecord, 0, capacity),
 	}
 }
 
 func (c *listCollector) startBatch() {
-	c.batchIterators = c.batchIterators[len(c.batchIterators):]
 	c.batchRecords = c.batchRecords[len(c.batchRecords):]
 }
 
-func (c *listCollector) next(tr *fdb.Transaction, record *ByKeyAndRevisionRecord) (fdb.Key, bool, error) {
-	if c.keysOnly {
-		c.batchRecords = append(c.batchRecords, &RevRecord{Rev: record.Key.Rev, Record: record.Value})
-	} else {
-		recordIt, err := c.f.byRevision.GetIterator(tr, record.Key.Rev)
-		if err != nil {
-			return nil, false, err
-		}
-		c.batchIterators = append(c.batchIterators, recordIt)
-
-		// Each GetIterator issues its range read eagerly, so accumulating
-		// iterators before draining lets FDB pipeline the record fetches;
-		// draining one at a time would pay a network round-trip per record.
-		if len(c.batchIterators) >= secondaryFetchPipeline {
-			if err := c.fetchIterators(); err != nil {
-				return nil, false, err
-			}
-		}
-	}
+func (c *listCollector) next(_ *fdb.Transaction, record *ByKeyAndRevisionRecord) (fdb.Key, bool, error) {
+	c.batchRecords = append(c.batchRecords, &RevRecord{Rev: record.Key.Rev, Record: record.Value})
 	return nil, c.needMore(), nil
 }
 
 func (c *listCollector) needMore() bool {
-	return c.limit == 0 || int64(len(c.batchIterators)+len(c.batchRecords)+len(c.records)) < c.limit
+	return c.limit == 0 || int64(len(c.batchRecords)+len(c.records)) < c.limit
 }
 
-func (c *listCollector) endBatch(*fdb.Transaction, bool) error {
-	if c.keysOnly {
+// endBatch fetches the values for every record collected in this batch with a
+// single contiguous range read over the by-key-data subspace (chunks are laid
+// out in the same key order as the index scan). Records without denormalized
+// data — written before the subspace existed — fall back to pipelined point
+// reads against the by-revision subspace.
+func (c *listCollector) endBatch(tr *fdb.Transaction, _ bool) error {
+	if c.keysOnly || len(c.batchRecords) == 0 {
 		return nil
-	} else {
-		return c.fetchIterators()
 	}
-}
 
-func (c *listCollector) fetchIterators() error {
-	for _, it := range c.batchIterators {
-		rev, record, err := c.f.byRevision.GetFromIterator(it)
+	firstKey := c.batchRecords[0].Record.Key
+	lastKey := c.batchRecords[len(c.batchRecords)-1].Record.Key
+	selector, err := c.f.byKeyData.RangeForKeys(firstKey, lastKey)
+	if err != nil {
+		return err
+	}
+
+	// merge-join: batch records and chunks are both ordered by key; chunks for
+	// superseded revisions of a key are skipped by the rev equality check.
+	bufs := make([][]byte, len(c.batchRecords))
+	idx := 0
+	it := tr.GetRange(selector, fdb.RangeOptions{Mode: fdb.StreamingModeWantAll}).Iterator()
+	for it.Advance() {
+		kv, err := it.Get()
 		if err != nil {
 			return err
-		} else if rev == nil {
-			return fmt.Errorf("no records in by rev iterator")
-		} else {
-			c.batchRecords = append(c.batchRecords, &RevRecord{Rev: *rev, Record: record})
+		}
+		chunk, err := c.f.byKeyData.parseKV(kv)
+		if err != nil {
+			return err
+		}
+		for idx < len(c.batchRecords) && c.batchRecords[idx].Record.Key < chunk.key {
+			idx++
+		}
+		if idx == len(c.batchRecords) {
+			break
+		}
+		rec := c.batchRecords[idx]
+		if rec.Record.Key == chunk.key && rec.Rev == chunk.rev {
+			bufs[idx] = append(bufs[idx], chunk.value...)
 		}
 	}
-	c.batchIterators = c.batchIterators[len(c.batchIterators):]
+
+	var legacy []int
+	for i, rec := range c.batchRecords {
+		switch {
+		case rec.Record.ValueSize == 0:
+			rec.Record.Value = []byte{}
+		case int64(len(bufs[i])) == rec.Record.ValueSize:
+			rec.Record.Value = bufs[i]
+		default:
+			legacy = append(legacy, i)
+		}
+	}
+	return c.fetchLegacy(tr, legacy)
+}
+
+// fetchLegacy resolves records that predate the by-key-data subspace via the
+// by-revision subspace, keeping up to secondaryFetchPipeline range reads in
+// flight so the fetches pipeline instead of paying a round-trip each.
+func (c *listCollector) fetchLegacy(tr *fdb.Transaction, indices []int) error {
+	for start := 0; start < len(indices); start += secondaryFetchPipeline {
+		end := min(start+secondaryFetchPipeline, len(indices))
+		iterators := make([]*fdb.RangeIterator, 0, end-start)
+		for _, i := range indices[start:end] {
+			it, err := c.f.byRevision.GetIterator(tr, c.batchRecords[i].Rev)
+			if err != nil {
+				return err
+			}
+			iterators = append(iterators, it)
+		}
+		for j, it := range iterators {
+			rev, record, err := c.f.byRevision.GetFromIterator(it)
+			if err != nil {
+				return err
+			}
+			if rev == nil {
+				return fmt.Errorf("no records in by rev iterator")
+			}
+			c.batchRecords[indices[start+j]] = &RevRecord{Rev: *rev, Record: record}
+		}
+	}
 	return nil
 }
 
@@ -229,6 +271,16 @@ func newRecordCollector(f *FDB, maxRevision int64, inner Processor[*ByKeyAndRevi
 		maxRevision: maxRevision,
 		inner:       inner,
 	}
+}
+
+// streamingMode: an unbounded list consumes the whole range, where WantAll
+// fetches it in the fewest round trips; limited lists keep the adaptive
+// iterator mode so a small page doesn't over-fetch a huge prefix.
+func (c *recordCollector) streamingMode() fdb.StreamingMode {
+	if lc, ok := c.inner.(*listCollector); ok && lc.limit == 0 {
+		return fdb.StreamingModeWantAll
+	}
+	return fdb.StreamingModeIterator
 }
 
 func (c *recordCollector) startBatch() {

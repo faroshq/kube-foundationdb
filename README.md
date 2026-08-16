@@ -108,13 +108,15 @@ etcd v3.6.4, 20 workers, 1.5 KB values):
 | create (guarded txn) | 2677 ops/s, p50 7.1 ms | 2401 ops/s, p50 7.3 ms |
 | get+update (guarded txn) | 2771 ops/s, p50 6.9 ms | 1332 ops/s, p50 13.9 ms |
 | point get | 16.2k ops/s, p50 1.1 ms | 55.7k ops/s, p50 0.3 ms |
-| list 2000 objects | 44 ops/s, p50 88 ms | 525 ops/s, p50 7.7 ms |
+| list 2000 objects | 101 ops/s, p50 38 ms | 525 ops/s, p50 7.7 ms |
 | watch delivery | p50 1.0 ms | p50 <10 µs |
 
-Writes are competitive; reads pay one FDB network round-trip; large unpaginated
-LISTs are the main remaining gap (down from 372 ms after pipelining the
-per-record reads — see [docs/performance.md](docs/performance.md) for the
-analysis and the denormalization plan to close the rest).
+Writes are competitive; reads pay one FDB network round-trip. Unpaginated
+LISTs went from 372 ms to 38 ms (9.8×) via read pipelining plus value
+denormalization into a scan-ordered `byKeyData` subspace (lazy migration:
+pre-existing records fall back to point reads until rewritten) — see
+[docs/performance.md](docs/performance.md) for the analysis and remaining
+headroom.
 
 ## CI
 

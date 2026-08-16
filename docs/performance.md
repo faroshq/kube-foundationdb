@@ -21,30 +21,35 @@ the "index") and `by-revision` (revision → record with chunked value, the
 | Stage | list 2000 objs (p50) | Notes |
 |---|---|---|
 | baseline | 372 ms | secondary reads drained one at a time |
-| pipelined secondary reads (256 in flight) | **88 ms** | one-line fix; FDB issues range-read futures eagerly, so batching before draining lets the client pipeline them |
-| deeper pipeline (1024) | 87 ms | no further gain — proves drain stalls are gone |
+| pipelined secondary reads (256 in flight) | 88 ms | FDB issues range-read futures eagerly, so batching before draining lets the client pipeline them |
+| deeper pipeline (1024) | 87 ms | no further gain — drain stalls were gone |
+| **denormalized values (`byKeyData` subspace, shipped)** | **38 ms** | values chunked under `(key, rev, offset)` in a parallel subspace; each list batch fetches them with one contiguous WantAll range read merge-joined against the index scan |
+| WantAll index scan (shipped, marginal) | 38 ms | round trips weren't the remaining cost |
 | etcd v3.6.4 | 7.7 ms | single contiguous range stream |
 
-The fix shipped in `listCollector.next` (`secondaryFetchPipeline = 256`).
-Driver tests, smoke, kcp e2e all pass with it.
+Overall: **372 ms → 38 ms (9.8×)**. Writes are unchanged within noise (each
+write additionally stores its value chunks in `byKeyData`; tombstones are
+skipped). Compaction clears all three subspaces. **Migration is lazy**: records
+that predate `byKeyData` simply miss the merge-join and fall back to pipelined
+`byRevision` point reads (`fetchLegacy`), so mixed-format directories work and
+converge as objects are rewritten — covered by
+`TestListFallsBackWithoutDenormalizedData`.
 
-## Remaining gap and the path to etcd-class lists
+## Remaining gap
 
-The residual ~85 ms is the storage server processing ~2000 *individual* range
-requests (~40 µs each) plus the index scan. Ordered by impact:
+The residual ~30 ms for 2000 objects is spread across per-entry Go processing
+(tuple unpacks for ~4000 index entries and ~4000 chunks), gRPC marshaling of
+the ~3 MB response, and scanning not-yet-compacted superseded revisions
+(the bench holds 2 revisions/key; steady state after compaction is leaner).
+Ordered next steps:
 
-1. **Denormalize record data into the index subspace** (store the chunked
-   value under `by-key-and-revision/(key, rev, chunk)`), so a LIST becomes one
-   contiguous range scan — the same shape as etcd's single range stream.
-   Expect ~10× on top of today. Costs: ~2× storage and write bandwidth;
-   compaction must clear both copies; a migration for existing data.
-2. **Count without a full scan.** `Count` scans the whole prefix; the
+1. **Count without a full scan.** `Count` scans the whole prefix; the
    apiserver calls it per resource every minute for `storage_objects`
    metrics. Options: `GetEstimatedRangeSizeBytes`-based estimate, maintained
    per-prefix counters (atomic adds), or a short-lived cached count.
-3. **Streaming mode tuning** for the index scan (`StreamingModeIterator` →
-   `WantAll` when no limit) — minor; the scan itself is not the bottleneck.
-4. Split large scans by shard boundaries (`GetRangeSplitPoints`) and read
+2. Cheaper entry decoding (avoid full tuple unpack for chunk keys; the rev
+   and offset positions are fixed).
+3. Split large scans by shard boundaries (`GetRangeSplitPoints`) and read
    sub-ranges in parallel — matters once data outgrows one storage server;
    irrelevant on a single node.
 

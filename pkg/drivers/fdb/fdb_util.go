@@ -60,11 +60,15 @@ func processBatch(db fdb.Database, selector fdb.SelectorRange, collector Process
 		}
 	}()
 
+	mode := fdb.StreamingModeIterator
+	if m, ok := collector.(interface{ streamingMode() fdb.StreamingMode }); ok {
+		mode = m.streamingMode()
+	}
 	res, err := transact("batch", db, batchResult{}, func(tr fdb.Transaction) (batchResult, error) {
 		res := batchResult{collectorNeedsMore: true}
 
 		start := time.Now()
-		it := tr.GetRange(selector, fdb.RangeOptions{Mode: fdb.StreamingModeIterator}).Iterator()
+		it := tr.GetRange(selector, fdb.RangeOptions{Mode: mode}).Iterator()
 
 		collector.startBatch()
 		for i := 0; res.collectorNeedsMore; i++ {

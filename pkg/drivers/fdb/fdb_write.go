@@ -278,6 +278,14 @@ func (f *FDB) append(tr *fdb.Transaction, record *Record) (fdb.FutureKey, tuple.
 		return nil, uuid, err
 	}
 
+	// Tombstone values are only needed by watch/delete events, which read the
+	// by-revision subspace — writing them here would just bloat LIST scans.
+	if !record.IsDelete && len(record.Value) > 0 {
+		if err := f.byKeyData.WriteBlob(tr, record.Key, newRev, record.Value); err != nil {
+			return nil, uuid, err
+		}
+	}
+
 	if err := f.watch.Write(tr); err != nil {
 		return nil, uuid, err
 	}

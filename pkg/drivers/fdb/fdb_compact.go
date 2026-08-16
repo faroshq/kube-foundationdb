@@ -40,6 +40,9 @@ func (c *compactProcessor) next(tr *fdb.Transaction, it *fdb.RangeIterator) (fdb
 
 	if lastRecord.Key.Rev != *rev || record.IsDelete {
 		c.f.byKeyAndRevision.Delete(tr, &KeyAndRevision{Key: record.Key, Rev: *rev})
+		if err := c.f.byKeyData.Clear(tr, record.Key, *rev); err != nil {
+			return nil, false, err
+		}
 		if err := c.f.byRevision.Delete(tr, *rev); err != nil {
 			return nil, false, err
 		}
