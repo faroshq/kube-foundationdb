@@ -1,0 +1,63 @@
+name: Benchmark
+
+# Informational performance comparison: kube-foundationdb (FoundationDB) vs
+# real etcd, using apiserver-shaped workloads (guarded txn writes, gets, prefix
+# lists, watch latency). Shared runners are noisy — treat results as
+# indicative, not as a regression gate.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "43 4 * * 1"
+
+jobs:
+  bench:
+    name: FDB shim vs etcd
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ETCD_VERSION: v3.6.4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: ./.github/actions/setup-fdb
+      - name: Build and start shim
+        run: |
+          go build -o bin/kube-foundationdb ./cmd/kube-foundationdb
+          ./bin/kube-foundationdb --listen-address 127.0.0.1:2379 \
+            --metrics-bind-address 127.0.0.1:18081 \
+            --fdb-directory bench > /tmp/shim.log 2>&1 &
+          for i in $(seq 1 30); do
+            (exec 3<>/dev/tcp/127.0.0.1/2379) 2>/dev/null && exit 0
+            sleep 1
+          done
+          echo "shim did not start" >&2 && cat /tmp/shim.log && exit 1
+      - name: Start etcd
+        run: |
+          curl -fsSLo /tmp/etcd.tar.gz \
+            "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/etcd-${ETCD_VERSION}-linux-amd64.tar.gz"
+          tar -xzf /tmp/etcd.tar.gz -C /tmp
+          /tmp/etcd-${ETCD_VERSION}-linux-amd64/etcd --name bench --data-dir /tmp/etcd-data \
+            --listen-client-urls http://127.0.0.1:22379 \
+            --advertise-client-urls http://127.0.0.1:22379 \
+            --listen-peer-urls http://127.0.0.1:22380 \
+            --initial-advertise-peer-urls http://127.0.0.1:22380 \
+            --initial-cluster bench=http://127.0.0.1:22380 > /tmp/etcd.log 2>&1 &
+          for i in $(seq 1 30); do
+            (exec 3<>/dev/tcp/127.0.0.1/22379) 2>/dev/null && exit 0
+            sleep 1
+          done
+          echo "etcd did not start" >&2 && cat /tmp/etcd.log && exit 1
+      - name: Run benchmarks
+        run: |
+          {
+            echo "## kube-foundationdb (FoundationDB)"
+            echo '```'
+            go run ./test/bench --endpoint http://127.0.0.1:2379 --prefix "/registry/bench-$(date +%s)"
+            echo '```'
+            echo "## etcd ${ETCD_VERSION}"
+            echo '```'
+            go run ./test/bench --endpoint http://127.0.0.1:22379 --prefix "/registry/bench-$(date +%s)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

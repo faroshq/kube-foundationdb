@@ -56,6 +56,10 @@ test-e2e: build fdb-start ## full e2e: kcp binary running on FoundationDB
 vet:
 	go vet ./...
 
+.PHONY: bench
+bench: ## kube-style workload benchmark against a running shim (see test/bench)
+	go run ./test/bench --endpoint http://127.0.0.1:2379 --prefix /registry/bench-$$(date +%s)
+
 # ---- Upstream Kubernetes conformance (sig-api-machinery) ----
 # k3s runs in Docker with this shim as its datastore; the official conformance
 # image then runs the sig-api-machinery suite against it. Mirrors f8n's harness.

@@ -54,7 +54,6 @@ jobs:
             docker.io/rancher/k3s:${{ matrix.k8s }}-k3s1 server \
             --kube-apiserver-arg=etcd-compaction-interval=10s \
             --disable=coredns,servicelb,traefik,local-storage,metrics-server \
-            --kube-apiserver-arg=feature-gates=WatchList=true \
             --disable-network-policy
           for i in $(seq 1 90); do
             if docker exec k3s kubectl get --raw /readyz >/dev/null 2>&1; then
