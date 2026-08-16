@@ -105,15 +105,16 @@ etcd v3.6.4, 20 workers, 1.5 KB values):
 
 | Workload | kube-foundationdb | etcd v3.6.4 |
 |---|---|---|
-| create (guarded txn) | 2531 ops/s, p50 7.9 ms | 2401 ops/s, p50 7.3 ms |
-| get+update (guarded txn) | 2635 ops/s, p50 7.0 ms | 1332 ops/s, p50 13.9 ms |
-| point get | 17.0k ops/s, p50 1.1 ms | 55.7k ops/s, p50 0.3 ms |
-| list 2000 objects | 10 ops/s, p50 372 ms | 525 ops/s, p50 7.7 ms |
+| create (guarded txn) | 2677 ops/s, p50 7.1 ms | 2401 ops/s, p50 7.3 ms |
+| get+update (guarded txn) | 2771 ops/s, p50 6.9 ms | 1332 ops/s, p50 13.9 ms |
+| point get | 16.2k ops/s, p50 1.1 ms | 55.7k ops/s, p50 0.3 ms |
+| list 2000 objects | 44 ops/s, p50 88 ms | 525 ops/s, p50 7.7 ms |
 | watch delivery | p50 1.0 ms | p50 <10 µs |
 
 Writes are competitive; reads pay one FDB network round-trip; large unpaginated
-LISTs are the main gap (the apiserver's watch cache and pagination soften this
-in practice, but it's the first thing to optimize).
+LISTs are the main remaining gap (down from 372 ms after pipelining the
+per-record reads — see [docs/performance.md](docs/performance.md) for the
+analysis and the denormalization plan to close the rest).
 
 ## CI
 

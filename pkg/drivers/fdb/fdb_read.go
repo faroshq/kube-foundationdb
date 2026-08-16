@@ -15,6 +15,11 @@ type RevResult struct {
 	revRecords      []*RevRecord
 }
 
+// secondaryFetchPipeline is how many by-revision record reads are kept in
+// flight before draining them, during List. Bounded so a single list batch
+// holds at most this many outstanding range reads.
+const secondaryFetchPipeline = 256
+
 func (f *FDB) CurrentRevision(_ context.Context) (int64, error) {
 	lastWatchRev := f.lastWatchRev.Load()
 	if lastWatchRev != 0 {
@@ -157,7 +162,10 @@ func (c *listCollector) next(tr *fdb.Transaction, record *ByKeyAndRevisionRecord
 		}
 		c.batchIterators = append(c.batchIterators, recordIt)
 
-		if len(c.batchIterators) >= 1 {
+		// Each GetIterator issues its range read eagerly, so accumulating
+		// iterators before draining lets FDB pipeline the record fetches;
+		// draining one at a time would pay a network round-trip per record.
+		if len(c.batchIterators) >= secondaryFetchPipeline {
 			if err := c.fetchIterators(); err != nil {
 				return nil, false, err
 			}
