@@ -50,9 +50,9 @@ func TestListFallsBackWithoutDenormalizedData(t *testing.T) {
 
 	assertList("denormalized")
 
-	// simulate pre-denormalization data: wipe the by-key-data subspace
+	// simulate pre-denormalization data: wipe the current-value subspace
 	_, err := transact("wipe", inner.db, 0, func(tr fdb.Transaction) (int, error) {
-		tr.ClearRange(inner.byKeyData.GetSubspace())
+		tr.ClearRange(inner.byKeyCurrent.GetSubspace())
 		return 0, nil
 	})
 	require.NoError(t, err)

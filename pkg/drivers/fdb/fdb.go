@@ -40,7 +40,7 @@ type FDB struct {
 
 	byRevision       *ByRevisionSubspace
 	byKeyAndRevision *ByKeyAndRevisionSubspace
-	byKeyData        *ByKeyDataSubspace
+	byKeyCurrent     *ByKeyCurrentSubspace
 	watch            *WatchSubspace
 	compactRev       *CompactRevisionSubspace
 	rev              *RevisionSubspace
@@ -136,7 +136,7 @@ func (f *FDB) Start(ctx context.Context) error {
 
 	f.byRevision = CreateByRevisionSubspace(f.dir)
 	f.byKeyAndRevision = CreateByKeyRevisionSubspace(f.dir)
-	f.byKeyData = CreateByKeyDataSubspace(f.dir)
+	f.byKeyCurrent = CreateByKeyCurrentSubspace(f.dir)
 	f.watch = CreateWatchSubspace(f.dir)
 	f.compactRev = CreateCompactRevisionSubspace(f.dir)
 	f.rev = CreateRevisionSubspace(f.dir)

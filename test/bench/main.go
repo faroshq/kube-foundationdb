@@ -29,6 +29,7 @@ var (
 	lists    = flag.Int("lists", 50, "number of full prefix lists")
 	watchN   = flag.Int("watch-events", 300, "number of watch events to measure")
 	valSize  = flag.Int("value-size", 1536, "value size in bytes (~a small k8s object)")
+	settle   = flag.Duration("compact-settle", 5*time.Second, "wait after pre-list compaction for storage-engine cleanup")
 )
 
 type stats struct {
@@ -172,6 +173,17 @@ func main() {
 		os.Exit(1)
 	}
 	st.report("get+update (txn)", *updates)
+
+	// Compact away superseded revisions before the read phase, as the
+	// apiserver's periodic compaction would have in steady state, then let the
+	// storage engine settle: freshly written range tombstones transiently slow
+	// scans on both etcd (bbolt free pages) and FDB (deferred range clears).
+	if head, err := c.Get(ctx, key(0)); err == nil && len(head.Kvs) > 0 {
+		if _, err := c.Compact(ctx, head.Header.Revision); err != nil {
+			fmt.Fprintln(os.Stderr, "compact (non-fatal):", err)
+		}
+		time.Sleep(*settle)
+	}
 
 	// 3. point gets
 	st, err = runParallel(*gets, *workers, func(i int) error {

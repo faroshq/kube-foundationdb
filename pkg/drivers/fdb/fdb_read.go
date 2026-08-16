@@ -170,22 +170,24 @@ func (c *listCollector) endBatch(tr *fdb.Transaction, _ bool) error {
 
 	firstKey := c.batchRecords[0].Record.Key
 	lastKey := c.batchRecords[len(c.batchRecords)-1].Record.Key
-	selector, err := c.f.byKeyData.RangeForKeys(firstKey, lastKey)
+	selector, err := c.f.byKeyCurrent.RangeForKeys(firstKey, lastKey)
 	if err != nil {
 		return err
 	}
 
-	// merge-join: batch records and chunks are both ordered by key; chunks for
-	// superseded revisions of a key are skipped by the rev equality check.
+	// merge-join: batch records and chunks are both ordered by key. The join
+	// is only valid for records that are the newest revision of their key
+	// (snapshot isolation then guarantees the current subspace holds exactly
+	// that record's value); older pinned revisions go through fetchLegacy.
 	bufs := make([][]byte, len(c.batchRecords))
 	idx := 0
-	it := tr.GetRange(selector, fdb.RangeOptions{Mode: fdb.StreamingModeWantAll}).Iterator()
+	it := tr.Snapshot().GetRange(selector, fdb.RangeOptions{Mode: fdb.StreamingModeWantAll}).Iterator()
 	for it.Advance() {
 		kv, err := it.Get()
 		if err != nil {
 			return err
 		}
-		chunk, err := c.f.byKeyData.parseKV(kv)
+		chunk, err := c.f.byKeyCurrent.parseKV(kv)
 		if err != nil {
 			return err
 		}
@@ -196,7 +198,10 @@ func (c *listCollector) endBatch(tr *fdb.Transaction, _ bool) error {
 			break
 		}
 		rec := c.batchRecords[idx]
-		if rec.Record.Key == chunk.key && rec.Rev == chunk.rev {
+		if rec.Record.Key == chunk.key && rec.Record.LatestForKey {
+			if bufs[idx] == nil {
+				bufs[idx] = make([]byte, 0, rec.Record.ValueSize)
+			}
 			bufs[idx] = append(bufs[idx], chunk.value...)
 		}
 	}
@@ -283,6 +288,16 @@ func (c *recordCollector) streamingMode() fdb.StreamingMode {
 	return fdb.StreamingModeIterator
 }
 
+// snapshotReads: list and count scans are read-only, so conflict tracking is
+// skipped; compaction (which writes) keeps regular reads.
+func (c *recordCollector) snapshotReads() bool {
+	switch c.inner.(type) {
+	case *listCollector, *countCollector:
+		return true
+	}
+	return false
+}
+
 func (c *recordCollector) startBatch() {
 	c.inner.startBatch()
 	c.batchCurrentRecord = c.currentRecord
@@ -312,7 +327,12 @@ func (c *recordCollector) next(tr *fdb.Transaction, it *fdb.RangeIterator) (fdb.
 
 	recordRev := VersionstampToInt64(nextKeyAndRevRecord.Key.Rev)
 	if (c.maxRevision == 0 || recordRev <= c.maxRevision) && (c.firstRev == 0 || recordRev <= c.firstRev) {
+		nextKeyAndRevRecord.Value.LatestForKey = true
 		c.batchCurrentRecord = nextKeyAndRevRecord
+	} else if c.batchCurrentRecord != nil && c.batchCurrentRecord.Key.Key == nextKeyAndRevRecord.Key.Key {
+		// a newer revision exists beyond the requested window, so the
+		// current-value subspace does not hold the candidate's value
+		c.batchCurrentRecord.Value.LatestForKey = false
 	}
 
 	return c.f.byKeyAndRevision.GetSubspace().Pack(tuple.Tuple{nextKeyAndRevRecord.Key.Key, nextKeyAndRevRecord.Key.Rev}), needMore, nil

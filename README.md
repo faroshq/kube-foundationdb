@@ -108,15 +108,17 @@ etcd v3.6.4, 20 workers, 1.5 KB values):
 | create (guarded txn) | 2677 ops/s, p50 7.1 ms | 2401 ops/s, p50 7.3 ms |
 | get+update (guarded txn) | 2771 ops/s, p50 6.9 ms | 1332 ops/s, p50 13.9 ms |
 | point get | 16.2k ops/s, p50 1.1 ms | 55.7k ops/s, p50 0.3 ms |
-| list 2000 objects | 101 ops/s, p50 38 ms | 525 ops/s, p50 7.7 ms |
+| list 2000 objects | p50 22–39 ms (compaction-recency dependent) | p50 6–9 ms |
 | watch delivery | p50 1.0 ms | p50 <10 µs |
 
 Writes are competitive; reads pay one FDB network round-trip. Unpaginated
-LISTs went from 372 ms to 38 ms (9.8×) via read pipelining plus value
-denormalization into a scan-ordered `byKeyData` subspace (lazy migration:
-pre-existing records fall back to point reads until rewritten) — see
-[docs/performance.md](docs/performance.md) for the analysis and remaining
-headroom.
+LISTs went from 372 ms to 25.5 ms (14.6×) via read pipelining plus a
+current-value subspace that lets a list scan exactly the live bytes of a
+prefix in one contiguous range read (lazy migration: pre-existing records
+fall back to point reads until rewritten). CPU profiling showed proto/gRPC
+marshaling at ~2 % of the budget — the wins were bytes-scanned and
+allocations, not serialization. See
+[docs/performance.md](docs/performance.md) for the full analysis.
 
 ## CI
 

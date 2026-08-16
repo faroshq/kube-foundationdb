@@ -35,6 +35,11 @@ type Record struct {
 	ValueSize      int64
 	WriteUUID      tuple.UUID
 	Value          []byte
+
+	// LatestForKey is a transient scan-time marker (never persisted): true if
+	// this record is the newest revision of its key seen by the index scan,
+	// i.e. the current-value subspace holds exactly this record's value.
+	LatestForKey bool
 }
 
 type ByRevisionSubspace struct {

@@ -64,11 +64,21 @@ func processBatch(db fdb.Database, selector fdb.SelectorRange, collector Process
 	if m, ok := collector.(interface{ streamingMode() fdb.StreamingMode }); ok {
 		mode = m.streamingMode()
 	}
+	// read-only collectors never commit, so per-key read-conflict tracking in
+	// the client is pure overhead; snapshot reads skip it
+	snapshot := false
+	if sr, ok := collector.(interface{ snapshotReads() bool }); ok {
+		snapshot = sr.snapshotReads()
+	}
 	res, err := transact("batch", db, batchResult{}, func(tr fdb.Transaction) (batchResult, error) {
 		res := batchResult{collectorNeedsMore: true}
 
 		start := time.Now()
-		it := tr.GetRange(selector, fdb.RangeOptions{Mode: mode}).Iterator()
+		var rt fdb.ReadTransaction = tr
+		if snapshot {
+			rt = tr.Snapshot()
+		}
+		it := rt.GetRange(selector, fdb.RangeOptions{Mode: mode}).Iterator()
 
 		collector.startBatch()
 		for i := 0; res.collectorNeedsMore; i++ {

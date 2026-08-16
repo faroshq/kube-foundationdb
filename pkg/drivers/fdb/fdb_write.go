@@ -107,7 +107,7 @@ func (f *FDB) Create(_ context.Context, key string, value []byte, lease int64) (
 			createRecord.PrevRevision = lastRecord.Key.Rev
 		}
 
-		keyFuture, uuid, err := f.append(&tr, createRecord)
+		keyFuture, uuid, err := f.append(&tr, createRecord, 0)
 		if err != nil {
 			return newModificationResultRev(zeroFuture, nil, false), err
 		}
@@ -176,7 +176,7 @@ func (f *FDB) Update(_ context.Context, key string, value []byte, revision, leas
 			PrevRevision:   lastRecord.Key.Rev,
 		}
 
-		keyFuture, uuid, err := f.append(&tr, updateRecord)
+		keyFuture, uuid, err := f.append(&tr, updateRecord, lastRecord.Value.ValueSize)
 		if err != nil {
 			return newModificationResultRev(zeroFuture, nil, false), err
 		}
@@ -249,7 +249,7 @@ func (f *FDB) Delete(_ context.Context, key string, revision int64) (int64, *ser
 			PrevRevision:   lastRecord.Key.Rev,
 		}
 
-		keyFuture, uuid, err := f.append(&tr, deleteRecord)
+		keyFuture, uuid, err := f.append(&tr, deleteRecord, 0)
 		if err != nil {
 			return newModificationResultRev(zeroFuture, nil, false), err
 		}
@@ -263,7 +263,10 @@ func (f *FDB) Delete(_ context.Context, key string, revision int64) (int64, *ser
 	return res.getResult()
 }
 
-func (f *FDB) append(tr *fdb.Transaction, record *Record) (fdb.FutureKey, tuple.UUID, error) {
+// prevValueSize is the size of the key's previous live value: 0 when there is
+// none (new key or resurrect-after-delete, whose chunks were cleared), the old
+// ValueSize on update. It lets the current-value subspace avoid range clears.
+func (f *FDB) append(tr *fdb.Transaction, record *Record, prevValueSize int64) (fdb.FutureKey, tuple.UUID, error) {
 	uuid := createUUID()
 	record.WriteUUID = uuid
 	newRev, revFuture, err := f.rev.IncrementAndGet(tr)
@@ -278,10 +281,15 @@ func (f *FDB) append(tr *fdb.Transaction, record *Record) (fdb.FutureKey, tuple.
 		return nil, uuid, err
 	}
 
-	// Tombstone values are only needed by watch/delete events, which read the
-	// by-revision subspace — writing them here would just bloat LIST scans.
-	if !record.IsDelete && len(record.Value) > 0 {
-		if err := f.byKeyData.WriteBlob(tr, record.Key, newRev, record.Value); err != nil {
+	// Maintain the current-value subspace: replaced on create/update, cleared
+	// on delete. Tombstone values are only needed by watch/delete events,
+	// which read the by-revision subspace.
+	if record.IsDelete {
+		if err := f.byKeyCurrent.Clear(tr, record.Key); err != nil {
+			return nil, uuid, err
+		}
+	} else {
+		if err := f.byKeyCurrent.Replace(tr, record.Key, record.Value, prevValueSize); err != nil {
 			return nil, uuid, err
 		}
 	}
