@@ -50,11 +50,14 @@ runs:
         # the database at ~1 GiB per process. The driver denormalizes every
         # value into a second subspace, so the large-record tests write well
         # past that and the cluster starts stalling commits (error 1031).
-        # The ssd engine is bounded by runner disk instead.
-        fdbcli --exec "configure ssd" --timeout 30
-        for i in $(seq 1 30); do
-          if fdbcli --exec "status minimal" --timeout 5 2>/dev/null | grep -q "available"; then
+        # The ssd engine is bounded by runner disk instead. A live engine
+        # change needs a migration mode; on the empty fresh database an
+        # aggressive migration completes immediately.
+        fdbcli --exec "configure storage_migration_type=aggressive ssd" --timeout 30
+        for i in $(seq 1 60); do
+          if fdbcli --exec "status" --timeout 5 2>/dev/null | grep -qE "Storage engine +- ssd"             && fdbcli --exec "status minimal" --timeout 5 2>/dev/null | grep -q "available"; then
             echo "FoundationDB is available on the ssd storage engine"
+            fdbcli --exec "configure storage_migration_type=disabled" --timeout 10 || true
             exit 0
           fi
           sleep 2
