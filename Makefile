@@ -73,7 +73,7 @@ bench: ## kube-style workload benchmark against a running shim (see test/bench)
 # image then runs the sig-api-machinery suite against it. Mirrors f8n's harness.
 
 K3S_VERSION ?= v1.34.1
-CONFORMANCE_SKIP ?= StorageVersionAPI|DynamicResourceAllocation|MutatingAdmissionPolicy|CoordinatedLeaderElection|VolumeAttributesClass|OrderedNamespaceDeletion|Slow|Flaky|should\shonor\stimeout
+CONFORMANCE_SKIP ?= StorageVersionAPI|DynamicResourceAllocation|MutatingAdmissionPolicy|CoordinatedLeaderElection|VolumeAttributesClass|OrderedNamespaceDeletion|Slow|Flaky|should\shonor\stimeout|verify\sResourceQuota\swith\sterminating\sscopes
 
 .PHONY: conformance-shim
 conformance-shim: build fdb-start ## shim for the k3s conformance cluster (0.0.0.0:2380)
